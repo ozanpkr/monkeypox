@@ -21,7 +21,7 @@ class train:
         self._device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self._pretrained_size = 224
         self._batch_size = 8
-        self._num_epochs = 50
+        self._num_epochs = 100
         self._loss_fn = nn.CrossEntropyLoss()
         self._metrics = ['accuracy', 'loss',
                          'precision',
@@ -37,6 +37,7 @@ class train:
         self._image_datasets = None
         self._optimizer = None
         self.create_dataset()
+
     def create_dataset(self):
         pretrained_means = [0.485, 0.456, 0.406]
         pretrained_stds = [0.229, 0.224, 0.225]
@@ -69,10 +70,13 @@ class train:
         # Create training and validation datasets
         self._image_datasets = {x: datasets.ImageFolder(os.path.join(self._root, x), data_transforms[x]) for x in
                                 ['train', 'test', 'val']}
+        print(">>Number of images in training={}\n".format(self._image_datasets['train']))
+        print(">>Number of images in val={}\n".format(self._image_datasets['val']))
+        print(">>Number of images in test={}\n".format(self._image_datasets['test']))
         # Create training and validation dataloaders
         self._dataloaders = {
             x: torch.utils.data.DataLoader(self._image_datasets[x], batch_size=self._batch_size, shuffle=True,
-                                           num_workers=4,
+                                           num_workers=2,
                                            pin_memory=True) for x in ['train', 'test', 'val']}
 
     def train_epoch(self):
@@ -84,7 +88,7 @@ class train:
         __predictions = torch.tensor([0]).to(self._device)
 
         for images, labels in self._dataloaders["train"]:
-            images, labels = images.to(self._device), labels.to(self._device)
+            images, labels = images.to(self._device, non_blocking=True), labels.to(self._device, non_blocking=True)
             self._optimizer.zero_grad()
             output = self._model(images)
             loss = self._loss_fn(output, labels)
@@ -105,7 +109,7 @@ class train:
         __predictions = torch.tensor([0]).to(self._device)
 
         for images, labels in dataloader:
-            images, labels = images.to(self._device), labels.to(self._device)
+            images, labels = images.to(self._device, non_blocking=True), labels.to(self._device, non_blocking=True)
             output = self._model(images)
             loss = self._loss_fn(output, labels)
             valid_loss += loss.item() * images.size(0)
@@ -130,6 +134,21 @@ class train:
             self._model.last_linear.out_features = 4
         elif model_name == "darknet53":
             self._model.head.fc.out_features = 4
+
+        elif model_name == "seresnet50":
+            self._model.fc.out_features = 4
+        elif model_name == "cspdarknet53":
+            self._model.head.fc.out_features = 4
+        elif model_name == "levit_256":
+            self._model.head_dist.l.out_features = 4
+        elif model_name == "mnasnet_100":
+            self._model.classifier.out_features = 4
+        elif model_name == "xception71":
+            self._model.head.fc.out_features = 4
+        elif model_name == "repvgg_b0":
+            self._model.head.fc.out_features = 4
+        elif model_name == "tf_mobilenetv3_large_100":
+            self._model.classifier.out_features = 4
         else:
             print("Model is not defined by user!")
         self._model.to(self._device)
@@ -160,18 +179,25 @@ class train:
         with open(log_file, "w") as outfile:
             json.dump(history, outfile)
 
-    def train_model(self,model_name):
+    def train_model(self, model_name):
+        self._model_name = model_name
         self.create_model(model_name)
         history = self.set_history()
         best_acc = 0.0
         best_model_wts = None
+        _predictions = {}
+        _labels = {}
+        _predictions["train"] = []
+        _predictions["val"] = []
+        _labels["train"] = []
+        _labels["val"] = []
         for epoch in range(self._num_epochs):
-            train_loss, train_labels, train_predictions, train_scores = self.train_epoch()
-            test_loss, test_labels, test_predictions, test_scores = self.valid_epoch(self._dataloaders["val"])
+            train_loss, _labels["train"], _predictions["train"], train_scores = self.train_epoch()
+            test_loss, _labels["val"], _predictions["val"], test_scores = self.valid_epoch(self._dataloaders["val"])
             for phase in ['train', 'val']:
                 for metric in self._metrics:
                     if metric == "accuracy":
-                        history[phase][metric].append(accuracy_score(train_labels.cpu(), train_predictions.cpu()))
+                        history[phase][metric].append(accuracy_score(_labels[phase].cpu(), _predictions[phase].cpu()))
                     elif metric == "loss":
                         if phase == 'train':
                             history[phase][metric].append(train_loss / len(self._dataloaders[phase]))
@@ -179,21 +205,23 @@ class train:
                             history[phase][metric].append(test_loss / len(self._dataloaders[phase]))
                     elif metric == "precision":
                         history[phase][metric].append(
-                            precision_score(train_labels.cpu(), train_predictions.cpu(), average='weighted'))
+                            precision_score(_labels[phase].cpu(), _predictions[phase].cpu(), average='weighted'))
 
                     elif metric == "recall":
                         history[phase][metric].append(
-                            recall_score(train_labels.cpu(), train_predictions.cpu(), average='weighted'))
+                            recall_score(_labels[phase].cpu(), _predictions[phase].cpu(), average='weighted'))
 
                     elif metric == "f1-score":
                         history[phase][metric].append(
-                            f1_score(train_labels.cpu(), train_predictions.cpu(), average='weighted'))
+                            f1_score(_labels[phase].cpu(), _predictions[phase].cpu(), average='weighted'))
 
                     elif metric == "cohen_kappa_score":
-                        history[phase][metric].append(cohen_kappa_score(train_labels.cpu(), train_predictions.cpu()))
+                        history[phase][metric].append(
+                            cohen_kappa_score(_labels[phase].cpu(), _predictions[phase].cpu()))
 
                     elif metric == "matthews_corrcoef":
-                        history[phase][metric].append(matthews_corrcoef(train_labels.cpu(), train_predictions.cpu()))
+                        history[phase][metric].append(
+                            matthews_corrcoef(_labels[phase].cpu(), _predictions[phase].cpu()))
             # deep copy the model
             if history["val"]["accuracy"][epoch] > best_acc:
                 print('Best Val Acc. has been updated: {:4f}'.format(history["val"]["accuracy"][epoch]))
